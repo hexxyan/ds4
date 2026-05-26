@@ -102,18 +102,17 @@ static void free_node_recursive(ds4_suffix_node *node) {
 }
 
 /* Decrement all node frequencies by 1 (clamp at 0) via iterative DFS.
- * Uses an explicit stack to avoid deep recursion on large trees. */
+ * Uses a dynamically-allocated stack to handle wide trees without
+ * silently dropping nodes. */
 static void decrement_all_freqs(ds4_suffix_node *root) {
-    /* Simple iterative DFS with a small stack.
-     * Typical tree depth is <= 32 (max_depth), so recursion is safe,
-     * but we use an explicit stack for robustness. */
-    ds4_suffix_node *stack[256];
-    uint32_t stack_depth[256];
-    int sp = 0;
+    /* Start with a reasonable on-stack buffer; malloc a larger one if needed. */
+    uint32_t stack_cap = 1024;
+    ds4_suffix_node **stack = (ds4_suffix_node **)ST_MALLOC(
+        (size_t)stack_cap * sizeof(ds4_suffix_node *));
+    if (!stack) return;  /* OOM: skip aging (not fatal) */
 
-    stack[0] = root;
-    stack_depth[0] = 0;
-    sp = 1;
+    int sp = 0;
+    stack[sp++] = root;
 
     while (sp > 0) {
         sp--;
@@ -121,13 +120,28 @@ static void decrement_all_freqs(ds4_suffix_node *root) {
         /* Decrement freq, clamp at 0. */
         if (node->freq > 0) node->freq--;
 
+        /* Grow stack if needed to fit all children. */
+        if (node->n_children > 0 &&
+            (uint32_t)(sp + (int)node->n_children) > stack_cap) {
+            uint32_t new_cap = stack_cap * 2;
+            if (new_cap < stack_cap + node->n_children)
+                new_cap = stack_cap + node->n_children;
+            ds4_suffix_node **new_stack = (ds4_suffix_node **)ST_REALLOC(
+                stack, (size_t)new_cap * sizeof(ds4_suffix_node *));
+            if (!new_stack) break;  /* OOM: stop early */
+            stack = new_stack;
+            stack_cap = new_cap;
+        }
+
         /* Push children onto stack. */
-        for (uint32_t i = 0; i < node->n_children && sp < 256; i++) {
-            stack[sp] = &node->children[i];
-            stack_depth[sp] = stack_depth[sp > 0 ? sp - 1 : 0] + 1;
-            sp++;
+        for (uint32_t i = 0; i < node->n_children; i++) {
+            if (sp < (int)stack_cap) {
+                stack[sp++] = &node->children[i];
+            }
         }
     }
+
+    ST_FREE(stack);
 }
 
 /* Recursively remove leaf nodes with freq==0.
@@ -165,7 +179,7 @@ static uint32_t remove_zero_leaves(ds4_suffix_node *node) {
 
 /* ---------- public API ---------- */
 
-ds4_suffix_tree *ds4_suffix_tree_alloc(uint64_t node_budget,
+ds4_suffix_tree *ds4_suffix_tree_alloc(uint64_t byte_budget,
                                          uint32_t max_depth) {
     ds4_suffix_tree *tree = (ds4_suffix_tree *)ST_CALLOC(1, sizeof(*tree));
     if (!tree) return NULL;
@@ -173,7 +187,11 @@ ds4_suffix_tree *ds4_suffix_tree_alloc(uint64_t node_budget,
     tree->root.token_id = -1;
     tree->root.freq = 0;
     tree->node_count = 0;
-    tree->node_budget = node_budget;
+    /* Convert byte budget to node budget.  Each node uses ~sizeof(node) plus
+     * average ~50% children-array overhead.  We use a conservative 1.5x. */
+    uint64_t node_size_est = (uint64_t)(sizeof(ds4_suffix_node) * 3 / 2);
+    tree->node_budget = byte_budget / (node_size_est > 0 ? node_size_est : 1);
+    if (tree->node_budget < 1024) tree->node_budget = 1024;  /* floor */
     tree->total_bytes = sizeof(*tree);
     tree->max_depth = max_depth;
     tree->query_count = 0;
@@ -298,6 +316,7 @@ uint32_t ds4_suffix_tree_prune(ds4_suffix_tree *tree) {
     uint32_t removed = remove_zero_leaves(&tree->root);
 
     tree->node_count -= removed;
+    tree->total_bytes -= (uint64_t)removed * sizeof(ds4_suffix_node);
     return removed;
 }
 

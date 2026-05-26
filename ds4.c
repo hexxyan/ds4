@@ -18770,7 +18770,18 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
         if (ds4_session_eval(s, first_token, err, errlen) != 0) return -1;
         accepted[0] = first_token;
         if (s->suffix_tree) {
-            ds4_suffix_tree_insert(s->suffix_tree, accepted, 1);
+            /* Insert the full accepted context for pattern learning.
+             * On CPU we only get 1 token at a time, but the session
+             * checkpoint carries the full history. */
+            uint32_t insert_len = (uint32_t)s->checkpoint.len;
+            uint32_t max_d = s->engine->suffix_max_depth;
+            if (insert_len > max_d) {
+                ds4_suffix_tree_insert(s->suffix_tree,
+                    s->checkpoint.v + (insert_len - (int)max_d), max_d);
+            } else if (insert_len > 0) {
+                ds4_suffix_tree_insert(s->suffix_tree,
+                    s->checkpoint.v, insert_len);
+            }
         }
         return 1;
     }
@@ -19395,6 +19406,13 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
     }
     if (s->suffix_tree && n_accept > 0) {
         ds4_suffix_tree_insert(s->suffix_tree, accepted, (uint32_t)n_accept);
+        /* Track how many suffix-tree draft tokens were accepted.
+         * drafts[0] is the MTP-verified first token; drafts[1..] are suffix
+         * tree proposals when used_suffix_tree==true.  */
+        if (used_suffix_tree && n_accept > 1) {
+            s->suffix_tree->draft_tokens_accepted +=
+                (uint64_t)(n_accept - 1);  /* exclude the MTP-verified first */
+        }
     }
     return n_accept;
 #endif

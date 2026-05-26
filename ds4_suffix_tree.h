@@ -48,9 +48,11 @@ typedef struct ds4_suffix_tree {
     uint64_t draft_tokens_accepted;
 } ds4_suffix_tree;
 
-/* Create a suffix tree with the given memory budget and max depth.
+/* Create a suffix tree with the given byte memory budget and max depth.
+ * The byte budget is internally converted to a node budget based on
+ * estimated per-node memory cost (~1.5 * sizeof(ds4_suffix_node)).
  * Returns NULL on allocation failure. */
-ds4_suffix_tree *ds4_suffix_tree_alloc(uint64_t node_budget,
+ds4_suffix_tree *ds4_suffix_tree_alloc(uint64_t byte_budget,
                                         uint32_t max_depth);
 
 /* Free a suffix tree and all its nodes. */
