@@ -33,7 +33,7 @@ CPU_CORE_OBJS = ds4_cpu.o
 METAL_LDLIBS := $(LDLIBS)
 endif
 
-.PHONY: all help clean test cpu cuda cuda-spark cuda-generic cuda-regression
+.PHONY: all help clean test suffix-tree-test cpu cuda cuda-spark cuda-generic cuda-regression
 
 ifeq ($(UNAME_S),Darwin)
 all: ds4 ds4-server ds4-bench ds4-eval ds4-agent
@@ -127,6 +127,12 @@ ds4.o: ds4.c ds4.h ds4_gpu.h ds4_suffix_tree.h
 ds4_suffix_tree.o: ds4_suffix_tree.c ds4_suffix_tree.h
 	$(CC) $(CFLAGS) -c -o $@ ds4_suffix_tree.c
 
+tests/suffix_tree_test: tests/suffix_tree_test.c ds4_suffix_tree.c ds4_suffix_tree.h
+	$(CC) $(CFLAGS) -I. -o $@ tests/suffix_tree_test.c ds4_suffix_tree.c $(LDLIBS)
+
+suffix-tree-test: tests/suffix_tree_test
+	./tests/suffix_tree_test
+
 ds4_cli.o: ds4_cli.c ds4.h linenoise.h
 	$(CC) $(CFLAGS) -c -o $@ ds4_cli.c
 
@@ -194,9 +200,9 @@ else
 	$(NVCC) $(NVCCFLAGS) -o $@ ds4_test.o ds4_kvstore.o rax.o $(CORE_OBJS) $(CUDA_LDLIBS)
 endif
 
-test: ds4_test ds4-eval
+test: suffix-tree-test ds4_test ds4-eval
 	./ds4-eval --self-test-extractors
 	./ds4_test
 
 clean:
-	rm -f ds4 ds4-server ds4-bench ds4-eval ds4-agent ds4_cpu ds4_native ds4_server_test ds4_test *.o tests/cuda_long_context_smoke tests/cuda_long_context_smoke.o
+	rm -f ds4 ds4-server ds4-bench ds4-eval ds4-agent ds4_cpu ds4_native ds4_server_test ds4_test *.o tests/cuda_long_context_smoke tests/cuda_long_context_smoke.o tests/suffix_tree_test

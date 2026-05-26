@@ -3,7 +3,7 @@
 **Date**: 2026-05-26
 **Status**: Draft
 **Author**: codex/ds4-sota-audit branch
-**Reference Paper**: SuffixDecoding: Extreme Speculative Decoding for Emerging AI Applications (NeurIPS 2025 Spotlight, arxiv:2411.04975)
+**Reference Paper**: SuffixDecoding: Extreme Speculative Decoding for Emerging AI Applications (arxiv:2411.04975)
 **Reference Implementation**: github.com/snowflakedb/ArcticInference (Apache 2.0)
 
 ## 1. Summary
@@ -16,9 +16,14 @@ Integrate SuffixDecoding as a complementary model-free speculative decoding draf
 
 - **Model-free**: No separate draft model needed. No DFlash/PARD/EAGLE draft model blocker.
 - **Complementary to MTP**: MTP is accurate for 1-2 token predictions; SuffixDecoding excels at 5-10+ token repetitive pattern matching. They can hybrid.
-- **Perfect fit for ds4's agent workload**: ds4 is designed for server/agent long-context reuse. Agent workloads (SWE-Bench, tool calls, code templates) have highly repetitive output patterns. SuffixDecoding achieves 5.3x speedup on agentic benchmarks, 2.8x faster than EAGLE-2/3.
+- **Perfect fit for ds4's agent workload**: ds4 is designed for server/agent
+  long-context reuse. Agent workloads (SWE-Bench, tool calls, code templates)
+  have highly repetitive output patterns, which is exactly the regime targeted
+  by SuffixDecoding.
 - **No big hardware needed for validation**: Suffix tree is a pure CPU data structure. Correctness can be verified on CPU-only sessions without 80GB+ models.
-- **NeurIPS 2025 Spotlight**: Strong academic credibility.
+- **Fresh academic work with production-adjacent implementations**: the paper is
+  public on arXiv and the method has related ArcticInference/vLLM integration
+  work, making it both current and concrete.
 
 ### 2.2 What SuffixDecoding Is NOT
 
@@ -95,7 +100,7 @@ The existing verification infrastructure is **completely reused**:
 
 - `metal_graph_verify_suffix_tops()` -- verifies drafted tokens against target model
 - `spec_frontier_snapshot()` / `spec_frontier_restore()` -- KV cache rollback
-- `DS4_MTP_KEEP_ACCEPTED()` -- raw SWA counter management
+- `DS4_MTP_KEEP_ACCEPTED()` -- raw SWA counter management for MTP drafts only
 - Token acceptance loop: compare `row_tops[i-1]` against `drafts[i]`
 
 The suffix tree only changes **what goes into the drafts[] array**. Everything after that is unchanged.
@@ -121,9 +126,11 @@ uint64_t suffix_memory_budget;  /* max tree memory in bytes (default 64MB) */
 --suffix-memory-budget MB   Max tree memory in MB (default 64)
 ```
 
-### 4.3 No Public API Changes
+### 4.3 Narrow Public API
 
-The suffix tree is internal to `ds4_session_eval_speculative_argmax()`. No changes to `ds4.h`.
+The suffix trie internals stay private to `ds4_suffix_tree.h/.c`. The public
+engine header exposes only the opt-in engine options and the small
+`ds4_suffix_stats` telemetry snapshot used by CLI/bench tooling.
 
 ## 5. Implementation Plan
 
@@ -142,9 +149,10 @@ File: `ds4_suffix_tree.h` + `ds4_suffix_tree.c`
 
 - Allocate suffix tree in `ds4_session_create()` when `suffix_decoding` is enabled
 - Free in `ds4_session_free()`
-- Insert accepted tokens after each successful speculative decode round
+- Seed the tree from prompt/checkpoint tokens after sync or payload restore
+- Keep learning from normal and speculative accepted tokens during generation
 - Query before MTP drafting in `ds4_session_eval_speculative_argmax()`
-- Invalidate on `ds4_session_sync()` / `ds4_session_rewind()`
+- Reset on incompatible sync / invalidate / rewind
 
 ### Phase 3: Hybrid Draft Selection (~80 lines in ds4.c)
 
@@ -152,7 +160,7 @@ File: `ds4_suffix_tree.h` + `ds4_suffix_tree.c`
 - Modify speculative decode loop:
   1. If suffix decoding enabled, query tree with last N context tokens
   2. If tree returns >= `min_suffix_len` candidates (default 2), use them as drafts[]
-  3. If tree returns < `min_suffix_len` candidates, fall back to MTP drafting entirely
+  3. If tree returns < `min_suffix_len` candidates, fall back to MTP when MTP is available; otherwise emit only the already accepted target token
   4. Initial version does NOT merge suffix + MTP drafts — uses one or the other
   5. Verification path is identical regardless of draft source
 - Telemetry: `DS4_SUFFIX_SPEC_LOG` env var for debugging
@@ -200,7 +208,7 @@ When `node_count` exceeds `node_budget`:
 ### 6.3 Session Lifecycle
 
 - Tree is created when session is created (if enabled)
-- Tree is reset (all nodes cleared) on `ds4_session_sync()` with a different prefix
+- Tree is rebuilt from the synchronized prompt on `ds4_session_sync()`
 - Tree is preserved across `ds4_session_eval()` calls (within the same context)
 - Tree is freed when session is freed
 
@@ -217,8 +225,8 @@ When `node_count` exceeds `node_budget`:
 ### 7.2 Forward Compatibility
 
 - Suffix tree state is NOT persisted to disk KV payload (same as MTP draft state)
-- After loading a disk checkpoint, suffix tree starts empty and rebuilds during generation
-- This avoids payload version changes
+- After loading a disk checkpoint, the suffix tree is rebuilt from the restored
+  checkpoint tokens without changing the payload format.
 
 ## 8. Risks and Mitigations
 
@@ -226,7 +234,7 @@ When `node_count` exceeds `node_budget`:
 |------|-----------|
 | Tree memory grows unbounded | Hard memory budget + pruning |
 | Adversarial input creates pathological tree | Max depth limit + pruning |
-| Suffix drafts are all rejected (wasted tree lookup) | Only query tree when MTP is not available or MTP acceptance rate is low |
+| Suffix drafts are all rejected (wasted tree lookup) | Require a minimum match length and verify every token against the target stream |
 | Incorrect drafts corrupt session state | Full reuse of existing verify/rollback path |
 | Performance regression from tree maintenance | Tree operations are O(depth) per token, negligible vs GPU forward pass |
 
@@ -241,7 +249,7 @@ When `node_count` exceeds `node_budget`:
 
 ## 10. Resume Bullet
 
-> Integrated SuffixDecoding (NeurIPS 2025 Spotlight) model-free speculative decoding into DwarfStar (antirez/ds4), a DeepSeek V4-specific C/Metal/CUDA inference engine, as a complementary draft source alongside MTP. Implemented a bounded-memory suffix tree in pure C that captures repetitive agentic output patterns for long-range speculative decoding, achieving significant speedup without requiring additional draft models or GPU kernels.
+> Integrated SuffixDecoding-style model-free speculative decoding into DwarfStar (antirez/ds4), a DeepSeek V4-specific C/Metal/CUDA inference engine, as a complementary draft source alongside MTP. Implemented a bounded-memory suffix trie in pure C that captures repetitive agentic output patterns for long-range speculative decoding without requiring additional draft models or GPU kernels.
 
 ## 11. References
 

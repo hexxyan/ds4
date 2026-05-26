@@ -53,6 +53,7 @@ typedef struct {
     uint64_t mtp_draft_slots;
     uint64_t mtp_accepted_tokens;
     uint64_t mtp_accepted_extra_tokens;
+    uint64_t spec_steps;
     double decode_eval_sec;
     double mtp_eval_sec;
     ds4_suffix_stats suffix;
@@ -469,6 +470,12 @@ int main(int argc, char **argv) {
                 ds4_engine_mtp_draft_tokens(engine),
                 cfg.mtp_margin);
     }
+    if (cfg.suffix_decoding) {
+        fprintf(stderr,
+                "ds4-bench: suffix decoding enabled (max_depth=%u, memory_budget=%llu bytes)\n",
+                cfg.suffix_max_depth,
+                (unsigned long long)cfg.suffix_memory_budget);
+    }
 
     char *text = read_file(cfg.prompt_path ? cfg.prompt_path : cfg.chat_prompt_path);
     ds4_tokens prompt = {0};
@@ -512,7 +519,7 @@ int main(int argc, char **argv) {
             "ctx_tokens,prefill_tokens,prefill_tps,gen_tokens,gen_tps,kvcache_bytes,"
             "context_total_bytes,context_raw_bytes,context_compressed_bytes,context_scratch_bytes,"
             "context_prefill_cap,context_raw_cap,context_comp_cap,"
-            "decode_eval_sec,mtp_draft_tokens,mtp_spec_steps,mtp_draft_slots,"
+            "decode_eval_sec,spec_steps,mtp_draft_tokens,mtp_spec_steps,mtp_draft_slots,"
             "mtp_accepted_tokens,mtp_accepted_extra_tokens,mtp_extra_accept_rate,mtp_eval_sec,"
             "suffix_tree_nodes,suffix_tree_bytes,suffix_draft_attempts,suffix_draft_hits,"
             "suffix_accepted_tokens,suffix_avg_draft_len\n");
@@ -555,9 +562,12 @@ int main(int argc, char **argv) {
         bench_decode_stats decode = {
             .mtp_draft_tokens = ds4_engine_mtp_draft_tokens(engine),
         };
-        const bool use_mtp =
-            decode.mtp_draft_tokens > 1 &&
-            getenv("DS4_MTP_SPEC_DISABLE") == NULL;
+        const bool suffix_spec =
+            cfg.suffix_decoding && cfg.backend != DS4_BACKEND_CPU;
+        const bool use_spec =
+            (decode.mtp_draft_tokens > 1 || suffix_spec) &&
+            getenv("DS4_MTP_SPEC_DISABLE") == NULL &&
+            getenv("DS4_SPEC_DISABLE") == NULL;
         const double gen_t0 = bench_now_sec();
         while (decode.generated < cfg.gen_tokens) {
             if (ds4_session_pos(session) + 1 >= ds4_session_ctx(session)) {
@@ -575,9 +585,10 @@ int main(int argc, char **argv) {
             int ntok = 0;
             const int remaining = cfg.gen_tokens - decode.generated;
             const double eval_t0 = bench_now_sec();
-            if (use_mtp) {
-                decode.mtp_steps++;
-                if (remaining > 1) {
+            if (use_spec) {
+                decode.spec_steps++;
+                if (decode.mtp_draft_tokens > 1) decode.mtp_steps++;
+                if (decode.mtp_draft_tokens > 1 && remaining > 1) {
                     int slots = decode.mtp_draft_tokens;
                     if (slots > (int)(sizeof(toks) / sizeof(toks[0])) - 1) {
                         slots = (int)(sizeof(toks) / sizeof(toks[0])) - 1;
@@ -595,14 +606,18 @@ int main(int argc, char **argv) {
                                                            sizeof(err));
                 const double eval_t1 = bench_now_sec();
                 decode.decode_eval_sec += eval_t1 - eval_t0;
-                decode.mtp_eval_sec += eval_t1 - eval_t0;
+                if (decode.mtp_draft_tokens > 1) {
+                    decode.mtp_eval_sec += eval_t1 - eval_t0;
+                }
                 if (ntok < 0) {
                     fprintf(stderr, "ds4-bench: speculative decode at frontier %d failed: %s\n", frontier, err);
                     rc = 1;
                     break;
                 }
-                decode.mtp_accepted_tokens += (uint64_t)ntok;
-                if (ntok > 1) decode.mtp_accepted_extra_tokens += (uint64_t)(ntok - 1);
+                if (decode.mtp_draft_tokens > 1) {
+                    decode.mtp_accepted_tokens += (uint64_t)ntok;
+                    if (ntok > 1) decode.mtp_accepted_extra_tokens += (uint64_t)(ntok - 1);
+                }
             } else {
                 if (ds4_session_eval(session, token, err, sizeof(err)) != 0) {
                     const double eval_t1 = bench_now_sec();
@@ -645,7 +660,7 @@ int main(int argc, char **argv) {
         fprintf(out,
                 "%d,%d,%.2f,%d,%.2f,%llu,"
                 "%llu,%llu,%llu,%llu,%u,%u,%u,"
-                "%.6f,%d,%llu,%llu,%llu,%llu,%.6f,%.6f,"
+                "%.6f,%llu,%d,%llu,%llu,%llu,%llu,%.6f,%.6f,"
                 "%llu,%llu,%llu,%llu,%llu,%.6f\n",
                 frontier,
                 prefill_tokens,
@@ -661,6 +676,7 @@ int main(int argc, char **argv) {
                 context_memory.raw_cap,
                 context_memory.comp_cap,
                 decode.decode_eval_sec,
+                (unsigned long long)decode.spec_steps,
                 decode.mtp_draft_tokens,
                 (unsigned long long)decode.mtp_steps,
                 (unsigned long long)decode.mtp_draft_slots,

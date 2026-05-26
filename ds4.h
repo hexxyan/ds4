@@ -5,7 +5,6 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
-#include "ds4_suffix_tree.h"
 
 /* Public engine boundary.
  *
@@ -57,6 +56,18 @@ typedef struct {
 
 typedef struct ds4_engine ds4_engine;
 typedef struct ds4_session ds4_session;
+
+#ifndef DS4_SUFFIX_STATS_DEFINED
+#define DS4_SUFFIX_STATS_DEFINED
+typedef struct ds4_suffix_stats {
+    uint64_t node_count;
+    uint64_t total_bytes;
+    uint64_t query_count;
+    uint64_t query_hits;
+    uint64_t draft_tokens_produced;
+    uint64_t draft_tokens_accepted;
+} ds4_suffix_stats;
+#endif
 
 typedef void (*ds4_session_progress_fn)(void *ud, const char *event, int current, int total);
 

@@ -469,6 +469,17 @@ static void print_generated_token(void *ud, int token) {
     free(text);
 }
 
+static bool cli_speculative_decode_enabled(ds4_engine *engine,
+                                           const cli_config *cfg) {
+    const bool suffix_spec =
+        cfg->engine.suffix_decoding && cfg->engine.backend != DS4_BACKEND_CPU;
+    return cfg->gen.temperature <= 0.0f &&
+           getenv("DS4_MTP_SPEC_DISABLE") == NULL &&
+           getenv("DS4_SPEC_DISABLE") == NULL &&
+           (ds4_engine_mtp_draft_tokens(engine) > 1 ||
+            suffix_spec);
+}
+
 static void build_prompt(ds4_engine *engine, const cli_generation_options *gen, ds4_tokens *out) {
     if (is_rendered_chat_prompt(gen->prompt)) {
         ds4_tokenize_rendered_chat(engine, gen->prompt, out);
@@ -533,8 +544,7 @@ static int run_sampled_generation(ds4_engine *engine, const cli_config *cfg, con
 
         int toks[17];
         int ntok = 0;
-        if (cfg->gen.temperature <= 0.0f && ds4_engine_mtp_draft_tokens(engine) > 1 &&
-            getenv("DS4_MTP_SPEC_DISABLE") == NULL) {
+        if (cli_speculative_decode_enabled(engine, cfg)) {
             ntok = ds4_session_eval_speculative_argmax(session,
                                                        token,
                                                        max_tokens - generated,
@@ -954,7 +964,8 @@ static int run_generation(ds4_engine *engine, const cli_config *cfg) {
             fprintf(stderr, "ds4: diagnostic run completed on the native %s path.\n",
                     ds4_backend_name(cfg->engine.backend));
         }
-    } else if (cfg->gen.temperature > 0.0f || ds4_engine_mtp_draft_tokens(engine) > 1) {
+    } else if (cfg->gen.temperature > 0.0f ||
+               cli_speculative_decode_enabled(engine, cfg)) {
         rc = run_sampled_generation(engine, cfg, &prompt);
     } else {
         token_printer printer = {
@@ -1181,8 +1192,7 @@ static int run_chat_turn(ds4_engine *engine, cli_config *cfg, repl_chat *chat, c
 
         int toks[17];
         int ntok = 0;
-        if (cfg->gen.temperature <= 0.0f && ds4_engine_mtp_draft_tokens(engine) > 1 &&
-            getenv("DS4_MTP_SPEC_DISABLE") == NULL) {
+        if (cli_speculative_decode_enabled(engine, cfg)) {
             ntok = ds4_session_eval_speculative_argmax(chat->session,
                                                        token,
                                                        max_tokens - generated,

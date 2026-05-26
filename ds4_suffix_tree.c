@@ -1,6 +1,6 @@
 /* ds4_suffix_tree.c -- Suffix trie for model-free speculative decoding.
  *
- * Reference: SuffixDecoding (NeurIPS 2025 Spotlight, arxiv:2411.04975).
+ * Reference: SuffixDecoding (arxiv:2411.04975).
  *
  * This is a compact trie (not a full suffix tree) where:
  * - Insert adds all suffixes of the token sequence up to max_depth long.
@@ -177,6 +177,14 @@ static uint32_t remove_zero_leaves(ds4_suffix_node *node) {
     return removed;
 }
 
+static void prune_toward_budget(ds4_suffix_tree *tree) {
+    if (!tree) return;
+    for (int pass = 0; tree->node_count > tree->node_budget && pass < 16; pass++) {
+        uint32_t removed = ds4_suffix_tree_prune(tree);
+        if (removed == 0) break;
+    }
+}
+
 /* ---------- public API ---------- */
 
 ds4_suffix_tree *ds4_suffix_tree_alloc(uint64_t byte_budget,
@@ -193,7 +201,7 @@ ds4_suffix_tree *ds4_suffix_tree_alloc(uint64_t byte_budget,
     tree->node_budget = byte_budget / (node_size_est > 0 ? node_size_est : 1);
     if (tree->node_budget < 1024) tree->node_budget = 1024;  /* floor */
     tree->total_bytes = sizeof(*tree);
-    tree->max_depth = max_depth;
+    tree->max_depth = max_depth ? max_depth : 1;
     tree->query_count = 0;
     tree->query_hits = 0;
     tree->draft_tokens_produced = 0;
@@ -212,6 +220,11 @@ uint32_t ds4_suffix_tree_insert(ds4_suffix_tree *tree,
     if (!tree || !tokens || len == 0) return 0;
     uint32_t created = 0;
     uint32_t max_d = tree->max_depth;
+    uint64_t prune_slack = tree->node_budget / 16;
+    uint64_t min_slack = (uint64_t)max_d * 4;
+    if (min_slack < 64) min_slack = 64;
+    if (prune_slack < min_slack) prune_slack = min_slack;
+    uint64_t prune_threshold = tree->node_budget + prune_slack;
 
     /* Insert all suffixes starting at each position.
      * Each suffix is truncated to max_depth tokens. */
@@ -233,11 +246,76 @@ uint32_t ds4_suffix_tree_insert(ds4_suffix_tree *tree,
             }
             cur = child;
         }
+        if (tree->node_count > prune_threshold) {
+            prune_toward_budget(tree);
+        }
     }
 
     /* Auto-prune if we exceeded budget. */
     if (tree->node_count > tree->node_budget) {
-        ds4_suffix_tree_prune(tree);
+        prune_toward_budget(tree);
+    }
+
+    return created;
+}
+
+uint32_t ds4_suffix_tree_append(ds4_suffix_tree *tree,
+                                 const int *tokens, uint32_t len) {
+    if (!tree || !tokens || len == 0) return 0;
+    if (len == 1) return ds4_suffix_tree_insert(tree, tokens, len);
+
+    uint32_t created = 0;
+    const uint32_t max_d = tree->max_depth;
+    const uint32_t new_idx = len - 1;
+    uint32_t start_min = 0;
+    if (max_d > 0 && len > max_d) start_min = len - max_d;
+
+    for (uint32_t start = start_min; start <= new_idx; start++) {
+        ds4_suffix_node *cur = &tree->root;
+        uint32_t j = start;
+
+        /* Existing suffix prefixes are already counted.  Walk them without
+         * bumping frequencies, then count only the newly appended tail edge. */
+        for (; j < new_idx; j++) {
+            int idx = find_child(cur, tokens[j]);
+            if (idx < 0) break;
+            cur = &cur->children[idx];
+        }
+
+        if (j < new_idx) {
+            for (; j <= new_idx; j++) {
+                int did_create = 0;
+                ds4_suffix_node *child =
+                    ensure_child(cur, tokens[j], &did_create);
+                if (!child) break;
+                child->freq++;
+                if (did_create) {
+                    tree->node_count++;
+                    tree->total_bytes += sizeof(ds4_suffix_node);
+                    created++;
+                }
+                cur = child;
+            }
+        } else {
+            int did_create = 0;
+            ds4_suffix_node *child =
+                ensure_child(cur, tokens[new_idx], &did_create);
+            if (!child) continue;
+            child->freq++;
+            if (did_create) {
+                tree->node_count++;
+                tree->total_bytes += sizeof(ds4_suffix_node);
+                created++;
+            }
+        }
+
+        if (tree->node_count > tree->node_budget) {
+            prune_toward_budget(tree);
+        }
+    }
+
+    if (tree->node_count > tree->node_budget) {
+        prune_toward_budget(tree);
     }
 
     return created;
@@ -269,13 +347,14 @@ uint32_t ds4_suffix_tree_query(ds4_suffix_tree *tree,
          start < prefix_len; start++) {
         ds4_suffix_node *cur = &tree->root;
         uint32_t depth = 0;
-        for (uint32_t j = start; j < prefix_len; j++) {
+        uint32_t j = start;
+        for (; j < prefix_len; j++) {
             int idx = find_child(cur, prefix[j]);
             if (idx < 0) break;
             cur = &cur->children[idx];
             depth++;
         }
-        if (depth > match_depth) {
+        if (j == prefix_len && depth > match_depth && cur->n_children > 0) {
             match = cur;
             match_depth = depth;
         }
@@ -300,6 +379,7 @@ uint32_t ds4_suffix_tree_query(ds4_suffix_tree *tree,
         cur = &cur->children[best];
     }
 
+    if (d == 0) return match_depth;
     *draft_n = d;
     tree->query_hits++;
     tree->draft_tokens_produced += d;

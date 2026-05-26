@@ -12,7 +12,7 @@
  * propose draft tokens during speculative decoding by looking up the current
  * context in the tree and returning the most frequent continuation.
  *
- * Reference: SuffixDecoding (NeurIPS 2025 Spotlight, arxiv:2411.04975).
+ * Reference: SuffixDecoding (arxiv:2411.04975).
  */
 
 /* One node in the suffix trie. */
@@ -24,6 +24,8 @@ typedef struct ds4_suffix_node {
     struct ds4_suffix_node *children;  /* sorted array by token_id */
 } ds4_suffix_node;
 
+#ifndef DS4_SUFFIX_STATS_DEFINED
+#define DS4_SUFFIX_STATS_DEFINED
 /* Statistics snapshot for telemetry. */
 typedef struct ds4_suffix_stats {
     uint64_t node_count;
@@ -33,6 +35,7 @@ typedef struct ds4_suffix_stats {
     uint64_t draft_tokens_produced;
     uint64_t draft_tokens_accepted;
 } ds4_suffix_stats;
+#endif
 
 /* The suffix tree handle. */
 typedef struct ds4_suffix_tree {
@@ -62,6 +65,12 @@ void ds4_suffix_tree_free(ds4_suffix_tree *tree);
  * Inserts suffixes starting from offsets [0, len-1] up to max_depth long.
  * Returns the number of new nodes created (0 if all paths existed). */
 uint32_t ds4_suffix_tree_insert(ds4_suffix_tree *tree,
+                                 const int *tokens, uint32_t len);
+
+/* Append the final token of `tokens[0..len-1]` to a tree that already learned
+ * tokens[0..len-2].  This extends only the suffix paths affected by the new
+ * tail token, avoiding repeated frequency inflation for older prefixes. */
+uint32_t ds4_suffix_tree_append(ds4_suffix_tree *tree,
                                  const int *tokens, uint32_t len);
 
 /* Query the tree for draft candidates given a prefix.
