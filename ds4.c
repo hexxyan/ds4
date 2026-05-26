@@ -18704,9 +18704,50 @@ int ds4_session_eval(ds4_session *s, int token, char *err, size_t errlen) {
     return ds4_session_eval_internal(s, token, true, err, errlen);
 }
 
+/*
+ * Query the suffix tree for draft candidates given the current context.
+ * Returns the match length p (0 if no match).  Fills drafts_out[0..*out_n-1]
+ * with proposed continuation tokens.  *out_n is set to the number of drafts
+ * produced (may be 0 even on a hit, if the continuation path is empty).
+ *
+ * draft_cap limits how many draft tokens we request; the adaptive cap is
+ * min(alpha * p, draft_cap) where alpha=1 initially.
+ */
+static uint32_t draft_from_suffix_tree(ds4_session *s,
+                                        int *drafts_out,
+                                        uint32_t draft_cap,
+                                        uint32_t *out_n)
+{
+    ds4_suffix_tree *tree = s->suffix_tree;
+    if (!tree || s->checkpoint.len < 2) {
+        *out_n = 0;
+        return 0;
+    }
+
+    ds4_engine *e = s->engine;
+    uint32_t prefix_len = (uint32_t)s->checkpoint.len;
+    if (prefix_len > e->suffix_max_depth) prefix_len = e->suffix_max_depth;
+    const int *prefix = s->checkpoint.v + (s->checkpoint.len - (int)prefix_len);
+
+    uint32_t suffix_draft_n = 0;
+    uint32_t p = ds4_suffix_tree_query(tree, prefix, prefix_len,
+                                        drafts_out, draft_cap,
+                                        &suffix_draft_n);
+    if (p < 2 || suffix_draft_n == 0) {
+        *out_n = 0;
+        return p;   /* may be >0 but too short to use */
+    }
+
+    /* Adaptive cap: draft_cap already accounts for room/slot limits.
+     * With alpha=1 we trust the match length directly. */
+    if (suffix_draft_n > draft_cap) suffix_draft_n = draft_cap;
+    *out_n = suffix_draft_n;
+    return p;
+}
+
 /* Speculative decode state machine:
  * 1. commit the normal target token and use its logits to validate draft[0];
- * 2. let MTP recursively draft a tiny suffix from its own raw-cache frontier;
+ * 2. let MTP recursively draft a tiny suffix, OR query the suffix tree;
  * 3. verify the suffix with the target graph, committing only the accepted
  *    prefix and rolling back speculative Metal state on miss;
  * 4. fall back to ordinary one-token decode if the fast verifier cannot prove
@@ -18805,6 +18846,45 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
         s->graph.mtp_n_raw = keep_; \
     } while (0)
 
+    /*
+     * Hybrid draft selection: try the suffix tree first.
+     * If the suffix tree has a match with p >= 2, use its drafts instead of
+     * the MTP recursive loop.  The verification path below doesn't care where
+     * drafts[] came from — it verifies against the target model regardless.
+     */
+    const bool suffix_spec_log = getenv("DS4_SUFFIX_SPEC_LOG") != NULL;
+    bool used_suffix_tree = false;
+    if (e->suffix_decoding && s->suffix_tree && draft_cap > 1) {
+        int suffix_drafts[16];
+        uint32_t suffix_n = 0;
+        uint32_t p = draft_from_suffix_tree(s, suffix_drafts,
+                                             (uint32_t)(draft_cap - 1),
+                                             &suffix_n);
+        if (p >= 2 && suffix_n > 0) {
+            /* Replace drafts[1..] with suffix tree proposals.
+             * drafts[0] stays as the verified MTP draft[0]. */
+            if (suffix_n > (uint32_t)(15)) suffix_n = 15;
+            for (uint32_t i = 0; i < suffix_n; i++) {
+                drafts[1 + i] = suffix_drafts[i];
+                if (suffix_drafts[i] == eos_token) {
+                    suffix_n = i + 1;
+                    break;
+                }
+            }
+            draft_n = 1 + (int)suffix_n;
+            used_suffix_tree = true;
+            if (suffix_spec_log) {
+                fprintf(stderr,
+                        "ds4: suffix spec hit p=%u drafts=%d (skipped MTP loop)\n",
+                        p, draft_n);
+            }
+        } else if (suffix_spec_log && p > 0) {
+            fprintf(stderr,
+                    "ds4: suffix spec too short p=%u (need >= 2)\n", p);
+        }
+    }
+
+    if (!used_suffix_tree) {
     for (; draft_n < draft_cap; draft_n++) {
         ds4_gpu_tensor *prev_hc = (draft_n & 1) ? s->graph.mtp_state_hc : s->graph.mtp_next_hc;
         ds4_gpu_tensor *out_hc = (draft_n & 1) ? s->graph.mtp_next_hc : s->graph.mtp_state_hc;
@@ -18829,14 +18909,15 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
             break;
         }
     }
-    if (mtp_conf_log && draft_n > 1) {
+    } /* !used_suffix_tree */
+    if (!used_suffix_tree && mtp_conf_log && draft_n > 1) {
         float v0 = 0.0f, v1 = 0.0f;
         logits_top2(s->mtp_logits, DS4_N_VOCAB, &mtp_last_top0, &v0, &mtp_last_top1, &v1);
         mtp_last_margin = v0 - v1;
     }
     if (mtp_timing) mtp_t_after_draft = now_sec();
 
-    if (!strict_mtp && draft_n == 2 && mtp_margin_threshold > 0.0f) {
+    if (!used_suffix_tree && !strict_mtp && draft_n == 2 && mtp_margin_threshold > 0.0f) {
         if (!mtp_conf_log) {
             float v0 = 0.0f, v1 = 0.0f;
             logits_top2(s->mtp_logits, DS4_N_VOCAB, &mtp_last_top0, &v0, &mtp_last_top1, &v1);
