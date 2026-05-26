@@ -36,6 +36,7 @@
 #include <unistd.h>
 
 #include "ds4.h"
+#include "ds4_suffix_tree.h"
 
 #ifndef DS4_NO_GPU
 #include "ds4_gpu.h"
@@ -15070,6 +15071,9 @@ struct ds4_engine {
     bool quality;
     bool metal_ready;
     bool mtp_ready;
+    bool suffix_decoding;
+    uint32_t suffix_max_depth;
+    uint64_t suffix_memory_budget;
 };
 
 static bool cpu_directional_steering_enabled(
@@ -16425,6 +16429,7 @@ struct ds4_session {
     int ctx_size;
     bool checkpoint_valid;
     bool mtp_draft_valid;
+    ds4_suffix_tree *suffix_tree;
 };
 
 /* =========================================================================
@@ -17993,6 +17998,9 @@ int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
     e->mtp_draft_tokens = opt->mtp_draft_tokens > 0 ? opt->mtp_draft_tokens : 1;
     if (e->mtp_draft_tokens > 16) e->mtp_draft_tokens = 16;
     e->mtp_margin = opt->mtp_margin >= 0.0f ? opt->mtp_margin : 3.0f;
+    e->suffix_decoding = opt->suffix_decoding;
+    e->suffix_max_depth = opt->suffix_max_depth > 0 ? opt->suffix_max_depth : 32;
+    e->suffix_memory_budget = opt->suffix_memory_budget > 0 ? opt->suffix_memory_budget : 64 * 1024 * 1024;
     if ((opt->directional_steering_attn != 0.0f || opt->directional_steering_ffn != 0.0f) &&
         (!opt->directional_steering_file || !opt->directional_steering_file[0]))
     {
@@ -18168,6 +18176,17 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
         kv_cache_init(&s->cpu_cache, (uint32_t)ctx_size, 0);
         cpu_decode_scratch_init(&s->cpu_scratch, (uint32_t)ctx_size);
         s->logits = xmalloc((size_t)DS4_N_VOCAB * sizeof(s->logits[0]));
+        if (e->suffix_decoding) {
+            s->suffix_tree = ds4_suffix_tree_alloc(e->suffix_memory_budget,
+                                                    e->suffix_max_depth);
+            if (!s->suffix_tree) {
+                free(s->logits);
+                cpu_decode_scratch_free(&s->cpu_scratch);
+                kv_cache_free(&s->cpu_cache);
+                free(s);
+                return 1;
+            }
+        }
         *out = s;
         return 0;
     }
@@ -18202,6 +18221,17 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
         s->mtp_logits = xmalloc((size_t)DS4_N_VOCAB * sizeof(s->mtp_logits[0]));
         s->mtp_draft_token = -1;
     }
+    if (e->suffix_decoding) {
+        s->suffix_tree = ds4_suffix_tree_alloc(e->suffix_memory_budget,
+                                                e->suffix_max_depth);
+        if (!s->suffix_tree) {
+            free(s->mtp_logits);
+            free(s->logits);
+            metal_graph_free(&s->graph);
+            free(s);
+            return 1;
+        }
+    }
     *out = s;
     return 0;
 #endif
@@ -18219,6 +18249,7 @@ void ds4_session_free(ds4_session *s) {
     }
 #endif
     token_vec_free(&s->checkpoint);
+    ds4_suffix_tree_free(s->suffix_tree);
     free(s->logits);
     free(s->mtp_logits);
     free(s);
@@ -18317,6 +18348,7 @@ int ds4_session_sync(ds4_session *s, const ds4_tokens *prompt, char *err, size_t
         }
 
         session_cpu_reset_cache(s);
+        if (s->suffix_tree) ds4_suffix_tree_reset(s->suffix_tree);
         prefill_layer_major_cpu(s->logits,
                                 &e->model,
                                 &e->weights,
@@ -18397,6 +18429,7 @@ int ds4_session_sync(ds4_session *s, const ds4_tokens *prompt, char *err, size_t
     bool ok;
     s->checkpoint_valid = false;
     s->mtp_draft_valid = false;
+    if (s->suffix_tree) ds4_suffix_tree_reset(s->suffix_tree);
     if (!metal_graph_reset_prefill_state(&s->graph)) {
         snprintf(err, errlen, "%s prefill state reset failed", backend_name);
         return 1;
@@ -18688,6 +18721,9 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
         if (!accepted || accepted_cap <= 0) return 0;
         if (ds4_session_eval(s, first_token, err, errlen) != 0) return -1;
         accepted[0] = first_token;
+        if (s->suffix_tree) {
+            ds4_suffix_tree_insert(s->suffix_tree, accepted, 1);
+        }
         return 1;
     }
 #ifdef DS4_NO_GPU
@@ -19269,6 +19305,9 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
                     n_accept);
         }
     }
+    if (s->suffix_tree && n_accept > 0) {
+        ds4_suffix_tree_insert(s->suffix_tree, accepted, (uint32_t)n_accept);
+    }
     return n_accept;
 #endif
 }
@@ -19277,6 +19316,7 @@ void ds4_session_invalidate(ds4_session *s) {
     s->checkpoint_valid = false;
     s->checkpoint.len = 0;
     s->mtp_draft_valid = false;
+    if (s->suffix_tree) ds4_suffix_tree_reset(s->suffix_tree);
 }
 
 void ds4_session_rewind(ds4_session *s, int pos) {
@@ -19284,6 +19324,7 @@ void ds4_session_rewind(ds4_session *s, int pos) {
     if (pos > s->checkpoint.len) pos = s->checkpoint.len;
     s->checkpoint.len = pos;
     s->mtp_draft_valid = false;
+    if (s->suffix_tree) ds4_suffix_tree_reset(s->suffix_tree);
 }
 
 int ds4_session_pos(ds4_session *s) {
