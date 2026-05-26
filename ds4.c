@@ -18885,30 +18885,30 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
     }
 
     if (!used_suffix_tree) {
-    for (; draft_n < draft_cap; draft_n++) {
-        ds4_gpu_tensor *prev_hc = (draft_n & 1) ? s->graph.mtp_state_hc : s->graph.mtp_next_hc;
-        ds4_gpu_tensor *out_hc = (draft_n & 1) ? s->graph.mtp_next_hc : s->graph.mtp_state_hc;
-        int mtp_top = -1;
-        if (!metal_graph_eval_mtp_draft_from_hc(&s->graph,
-                                                &e->model,
-                                                &e->weights,
-                                                &e->mtp_model,
-                                                &e->mtp_weights,
-                                                prev_hc,
-                                                out_hc,
-                                                drafts[draft_n - 1],
-                                                (uint32_t)(s->checkpoint.len + draft_n - 1),
-                                                mtp_need_logits ? s->mtp_logits : NULL,
-                                                &mtp_top))
-        {
-            return n_accept;
+        for (; draft_n < draft_cap; draft_n++) {
+            ds4_gpu_tensor *prev_hc = (draft_n & 1) ? s->graph.mtp_state_hc : s->graph.mtp_next_hc;
+            ds4_gpu_tensor *out_hc = (draft_n & 1) ? s->graph.mtp_next_hc : s->graph.mtp_state_hc;
+            int mtp_top = -1;
+            if (!metal_graph_eval_mtp_draft_from_hc(&s->graph,
+                                                    &e->model,
+                                                    &e->weights,
+                                                    &e->mtp_model,
+                                                    &e->mtp_weights,
+                                                    prev_hc,
+                                                    out_hc,
+                                                    drafts[draft_n - 1],
+                                                    (uint32_t)(s->checkpoint.len + draft_n - 1),
+                                                    mtp_need_logits ? s->mtp_logits : NULL,
+                                                    &mtp_top))
+            {
+                return n_accept;
+            }
+            drafts[draft_n] = mtp_top >= 0 ? mtp_top : sample_argmax(s->mtp_logits, DS4_N_VOCAB);
+            if (drafts[draft_n] == eos_token) {
+                draft_n++;
+                break;
+            }
         }
-        drafts[draft_n] = mtp_top >= 0 ? mtp_top : sample_argmax(s->mtp_logits, DS4_N_VOCAB);
-        if (drafts[draft_n] == eos_token) {
-            draft_n++;
-            break;
-        }
-    }
     } /* !used_suffix_tree */
     if (!used_suffix_tree && mtp_conf_log && draft_n > 1) {
         float v0 = 0.0f, v1 = 0.0f;
