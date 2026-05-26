@@ -16,7 +16,7 @@ METAL_SRCS := $(wildcard metal/*.metal)
 
 ifeq ($(UNAME_S),Darwin)
 METAL_LDLIBS := $(LDLIBS) -framework Foundation -framework Metal
-CORE_OBJS = ds4.o ds4_metal.o
+CORE_OBJS = ds4.o ds4_metal.o ds4_suffix_tree.o
 CPU_CORE_OBJS = ds4_cpu.o
 else
 CFLAGS += -D_GNU_SOURCE -fno-finite-math-only
@@ -28,7 +28,7 @@ NVCC_ARCH_FLAGS := -arch=$(CUDA_ARCH)
 endif
 NVCCFLAGS ?= -O3 -g -lineinfo --use_fast_math $(NVCC_ARCH_FLAGS) -Xcompiler $(NATIVE_CPU_FLAG) -Xcompiler -pthread
 CUDA_LDLIBS ?= -lm -Xcompiler -pthread -L$(CUDA_HOME)/targets/sbsa-linux/lib -L$(CUDA_HOME)/lib64 -lcudart -lcublas
-CORE_OBJS = ds4.o ds4_cuda.o
+CORE_OBJS = ds4.o ds4_cuda.o ds4_suffix_tree.o
 CPU_CORE_OBJS = ds4_cpu.o
 METAL_LDLIBS := $(LDLIBS)
 endif
@@ -121,8 +121,11 @@ cuda-regression: tests/cuda_long_context_smoke
 	./tests/cuda_long_context_smoke
 endif
 
-ds4.o: ds4.c ds4.h ds4_gpu.h
+ds4.o: ds4.c ds4.h ds4_gpu.h ds4_suffix_tree.h
 	$(CC) $(CFLAGS) -c -o $@ ds4.c
+
+ds4_suffix_tree.o: ds4_suffix_tree.c ds4_suffix_tree.h
+	$(CC) $(CFLAGS) -c -o $@ ds4_suffix_tree.c
 
 ds4_cli.o: ds4_cli.c ds4.h linenoise.h
 	$(CC) $(CFLAGS) -c -o $@ ds4_cli.c
