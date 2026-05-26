@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include "ds4_suffix_tree.h"
 
 /* Public engine boundary.
  *
@@ -217,5 +218,8 @@ int ds4_session_load_payload(ds4_session *s, FILE *fp, uint64_t payload_bytes, c
 int ds4_session_save_snapshot(ds4_session *s, ds4_session_snapshot *snap, char *err, size_t errlen);
 int ds4_session_load_snapshot(ds4_session *s, const ds4_session_snapshot *snap, char *err, size_t errlen);
 void ds4_session_snapshot_free(ds4_session_snapshot *snap);
+
+/* Suffix tree telemetry.  Fills *out with zero if suffix decoding is disabled. */
+void ds4_session_suffix_stats(ds4_session *s, ds4_suffix_stats *out);
 
 #endif

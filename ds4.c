@@ -18255,6 +18255,13 @@ void ds4_session_free(ds4_session *s) {
     free(s);
 }
 
+void ds4_session_suffix_stats(ds4_session *s, ds4_suffix_stats *out) {
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    if (!s || !s->suffix_tree) return;
+    ds4_suffix_tree_stats(s->suffix_tree, out);
+}
+
 int ds4_session_power(ds4_session *s) {
     if (!s || !s->engine) return 100;
     return s->engine->power_percent;

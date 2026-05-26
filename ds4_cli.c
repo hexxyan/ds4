@@ -112,6 +112,12 @@ static void usage(FILE *fp) {
         "      Apply steering after FFN outputs: y -= F*v*dot(v,y). Default with file: 1\n"
         "  --dir-steering-attn F\n"
         "      Apply steering after attention outputs. Default: 0\n"
+        "  --suffix-decoding\n"
+        "      Enable suffix tree speculative decoding (model-free draft tokens).\n"
+        "  --suffix-max-depth N\n"
+        "      Max sequence depth for the suffix tree. Default: 32\n"
+        "  --suffix-memory-budget MB\n"
+        "      Max tree memory in MB. Default: 64\n"
         "  --warm-weights\n"
         "      Touch mapped tensor pages before generation. Slower startup, fewer first-use stalls.\n"
         "  --power N\n"
@@ -1456,6 +1462,12 @@ static cli_config parse_options(int argc, char **argv) {
             c.engine.mtp_draft_tokens = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--mtp-margin")) {
             c.engine.mtp_margin = parse_float_range(need_arg(&i, argc, argv, arg), arg, 0.0f, 1000.0f);
+        } else if (!strcmp(arg, "--suffix-decoding")) {
+            c.engine.suffix_decoding = true;
+        } else if (!strcmp(arg, "--suffix-max-depth")) {
+            c.engine.suffix_max_depth = (uint32_t)parse_int(need_arg(&i, argc, argv, arg), arg);
+        } else if (!strcmp(arg, "--suffix-memory-budget")) {
+            c.engine.suffix_memory_budget = (uint64_t)parse_int(need_arg(&i, argc, argv, arg), arg) * 1024ULL * 1024ULL;
         } else if (!strcmp(arg, "-n") || !strcmp(arg, "--tokens")) {
             c.gen.n_predict = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "-c") || !strcmp(arg, "--ctx")) {
