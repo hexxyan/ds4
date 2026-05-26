@@ -66,6 +66,7 @@ typedef struct ds4_suffix_stats {
     uint64_t query_hits;
     uint64_t draft_tokens_produced;
     uint64_t draft_tokens_accepted;
+    double   draft_score_total;
 } ds4_suffix_stats;
 #endif
 
@@ -88,6 +89,9 @@ typedef struct {
     bool suffix_decoding;
     uint32_t suffix_max_depth;
     uint64_t suffix_memory_budget;
+    float suffix_spec_factor;
+    float suffix_spec_offset;
+    float suffix_min_prob;
 } ds4_engine_options;
 
 typedef void (*ds4_token_emit_fn)(void *ud, int token);

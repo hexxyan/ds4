@@ -72,8 +72,13 @@ static ds4_suffix_node *insert_child(ds4_suffix_node *parent, int token_id) {
     child->freq = 0;
     child->n_children = 0;
     child->cap_children = 0;
+    child->best_child_idx = UINT32_MAX;
     child->children = NULL;
     parent->n_children++;
+    /* Invalidate cached best child: the memmove may have shifted the
+     * old best_child_idx to a different position.  The next query will
+     * rescan and repopulate it. */
+    parent->best_child_idx = UINT32_MAX;
     return child;
 }
 
@@ -87,6 +92,16 @@ static ds4_suffix_node *ensure_child(ds4_suffix_node *parent, int token_id,
     }
     *created = 1;
     return insert_child(parent, token_id);
+}
+
+/* After bumping child->freq, check if it should become the cached best.
+ * child_idx is the index of the child in parent->children. */
+static void update_best_child(ds4_suffix_node *parent, uint32_t child_idx) {
+    if (parent->best_child_idx >= parent->n_children ||
+        parent->children[child_idx].freq >
+            parent->children[parent->best_child_idx].freq) {
+        parent->best_child_idx = child_idx;
+    }
 }
 
 /* Recursively free all children. */
@@ -171,6 +186,8 @@ static uint32_t remove_zero_leaves(ds4_suffix_node *node) {
                         sizeof(ds4_suffix_node));
             }
             node->n_children--;
+            /* Invalidate cached best child after structural change. */
+            node->best_child_idx = UINT32_MAX;
             removed++;
         }
     }
@@ -243,6 +260,10 @@ uint32_t ds4_suffix_tree_insert(ds4_suffix_tree *tree,
                 tree->node_count++;
                 tree->total_bytes += sizeof(ds4_suffix_node);
                 created++;
+            } else {
+                /* Existing child: update cached best child if needed. */
+                int cidx = find_child(cur, tok);
+                if (cidx >= 0) update_best_child(cur, (uint32_t)cidx);
             }
             cur = child;
         }
@@ -293,6 +314,9 @@ uint32_t ds4_suffix_tree_append(ds4_suffix_tree *tree,
                     tree->node_count++;
                     tree->total_bytes += sizeof(ds4_suffix_node);
                     created++;
+                } else {
+                    int cidx = find_child(cur, tokens[j]);
+                    if (cidx >= 0) update_best_child(cur, (uint32_t)cidx);
                 }
                 cur = child;
             }
@@ -306,6 +330,9 @@ uint32_t ds4_suffix_tree_append(ds4_suffix_tree *tree,
                 tree->node_count++;
                 tree->total_bytes += sizeof(ds4_suffix_node);
                 created++;
+            } else {
+                int cidx = find_child(cur, tokens[new_idx]);
+                if (cidx >= 0) update_best_child(cur, (uint32_t)cidx);
             }
         }
 
@@ -321,24 +348,12 @@ uint32_t ds4_suffix_tree_append(ds4_suffix_tree *tree,
     return created;
 }
 
-uint32_t ds4_suffix_tree_query(ds4_suffix_tree *tree,
-                                const int *prefix, uint32_t prefix_len,
-                                int *drafts, uint32_t max_drafts,
-                                uint32_t *draft_n) {
-    if (!tree || !prefix || !drafts || !draft_n) {
-        if (draft_n) *draft_n = 0;
-        return 0;
-    }
-    *draft_n = 0;
-    tree->query_count++;
+static uint32_t suffix_tree_find_match(ds4_suffix_tree *tree,
+                                        const int *prefix, uint32_t prefix_len,
+                                        ds4_suffix_node **match_out) {
+    if (match_out) *match_out = NULL;
+    if (!tree || !prefix || prefix_len == 0) return 0;
 
-    if (prefix_len == 0 || max_drafts == 0) return 0;
-
-    /* Walk the tree from the root using the prefix tokens.
-     * We try matching from different prefix start positions:
-     * first try the full prefix, then progressively shorter suffixes,
-     * until we find a match. This handles the case where only a
-     * suffix of the current context matches a stored sequence. */
     ds4_suffix_node *match = NULL;
     uint32_t match_depth = 0;
 
@@ -360,29 +375,78 @@ uint32_t ds4_suffix_tree_query(ds4_suffix_tree *tree,
         }
     }
 
+    if (match_out) *match_out = match;
+    return match ? match_depth : 0;
+}
+
+uint32_t ds4_suffix_tree_match_depth(ds4_suffix_tree *tree,
+                                      const int *prefix, uint32_t prefix_len) {
+    return suffix_tree_find_match(tree, prefix, prefix_len, NULL);
+}
+
+uint32_t ds4_suffix_tree_query(ds4_suffix_tree *tree,
+                                const int *prefix, uint32_t prefix_len,
+                                int *drafts, uint32_t max_drafts,
+                                uint32_t *draft_n,
+                                float min_prob, float *out_score) {
+    if (!tree || !prefix || !drafts || !draft_n) {
+        if (draft_n) *draft_n = 0;
+        if (out_score) *out_score = 0.0f;
+        return 0;
+    }
+    *draft_n = 0;
+    if (out_score) *out_score = 0.0f;
+    tree->query_count++;
+
+    if (prefix_len == 0 || max_drafts == 0) return 0;
+
+    ds4_suffix_node *match = NULL;
+    uint32_t match_depth =
+        suffix_tree_find_match(tree, prefix, prefix_len, &match);
     if (!match || match_depth == 0) return 0;
 
-    /* Now follow the most frequent continuation from the match node. */
+    /* Follow the most frequent continuation from the match node.
+     * Estimate probability at each step: prob *= child_freq / parent_freq.
+     * Stop early if prob drops below min_prob (ArcticInference-style filtering). */
     uint32_t d = 0;
+    float prob = 1.0f;
+    float score = 0.0f;
     ds4_suffix_node *cur = match;
     while (d < max_drafts && cur->n_children > 0) {
-        /* Pick the child with highest frequency. */
-        uint32_t best = 0;
-        uint32_t best_freq = cur->children[0].freq;
-        for (uint32_t i = 1; i < cur->n_children; i++) {
-            if (cur->children[i].freq > best_freq) {
-                best_freq = cur->children[i].freq;
-                best = i;
+        /* Use cached best child if valid, otherwise scan. */
+        uint32_t best = cur->best_child_idx;
+        if (best >= cur->n_children) {
+            best = 0;
+            uint32_t best_freq = cur->children[0].freq;
+            for (uint32_t i = 1; i < cur->n_children; i++) {
+                if (cur->children[i].freq > best_freq) {
+                    best_freq = cur->children[i].freq;
+                    best = i;
+                }
             }
+            /* Cache the result for future queries. */
+            cur->best_child_idx = best;
         }
+
+        /* Probability estimation: P(next_token | context) ≈ child_freq / parent_freq */
+        if (cur->freq > 0) {
+            prob *= (float)cur->children[best].freq / (float)cur->freq;
+        }
+
+        /* Stop if confidence too low (min_prob = 0 disables filtering). */
+        if (min_prob > 0.0f && prob < min_prob) break;
+
         drafts[d++] = cur->children[best].token_id;
+        score += prob;
         cur = &cur->children[best];
     }
 
     if (d == 0) return match_depth;
     *draft_n = d;
+    if (out_score) *out_score = score;
     tree->query_hits++;
     tree->draft_tokens_produced += d;
+    tree->draft_score_total += (double)score;
     return match_depth;
 }
 
@@ -420,4 +484,5 @@ void ds4_suffix_tree_stats(const ds4_suffix_tree *tree,
     out->query_hits = tree->query_hits;
     out->draft_tokens_produced = tree->draft_tokens_produced;
     out->draft_tokens_accepted = tree->draft_tokens_accepted;
+    out->draft_score_total = tree->draft_score_total;
 }

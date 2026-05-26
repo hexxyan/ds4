@@ -118,6 +118,12 @@ static void usage(FILE *fp) {
         "      Max sequence depth for the suffix tree. Default: 32\n"
         "  --suffix-memory-budget MB\n"
         "      Max tree memory in MB. Default: 64\n"
+        "  --suffix-spec-factor F\n"
+        "      Draft cap = match_len * F + spec_offset. Default: 1.0\n"
+        "  --suffix-spec-offset F\n"
+        "      Additive offset for the draft cap. Default: 0\n"
+        "  --suffix-min-prob F\n"
+        "      Stop drafting when estimated probability drops below F. Default: 0\n"
         "  --warm-weights\n"
         "      Touch mapped tensor pages before generation. Slower startup, fewer first-use stalls.\n"
         "  --power N\n"
@@ -1478,6 +1484,12 @@ static cli_config parse_options(int argc, char **argv) {
             c.engine.suffix_max_depth = (uint32_t)parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--suffix-memory-budget")) {
             c.engine.suffix_memory_budget = (uint64_t)parse_int(need_arg(&i, argc, argv, arg), arg) * 1024ULL * 1024ULL;
+        } else if (!strcmp(arg, "--suffix-spec-factor")) {
+            c.engine.suffix_spec_factor = parse_float_range(need_arg(&i, argc, argv, arg), arg, 0.000001f, 100.0f);
+        } else if (!strcmp(arg, "--suffix-spec-offset")) {
+            c.engine.suffix_spec_offset = parse_float_range(need_arg(&i, argc, argv, arg), arg, 0.0f, 100.0f);
+        } else if (!strcmp(arg, "--suffix-min-prob")) {
+            c.engine.suffix_min_prob = parse_float_range(need_arg(&i, argc, argv, arg), arg, 0.0f, 1.0f);
         } else if (!strcmp(arg, "-n") || !strcmp(arg, "--tokens")) {
             c.gen.n_predict = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "-c") || !strcmp(arg, "--ctx")) {

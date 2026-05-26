@@ -44,6 +44,9 @@ typedef struct {
     bool suffix_decoding;
     uint32_t suffix_max_depth;
     uint64_t suffix_memory_budget;
+    float suffix_spec_factor;
+    float suffix_spec_offset;
+    float suffix_min_prob;
 } bench_config;
 
 typedef struct {
@@ -96,6 +99,9 @@ static void usage(FILE *fp) {
         "  --suffix-max-depth N   Max sequence depth for suffix tree. Default: 32\n"
         "  --suffix-memory-budget MB\n"
         "      Max tree memory in MB. Default: 64\n"
+        "  --suffix-spec-factor F Draft cap = match_len * F + spec_offset. Default: 1.0\n"
+        "  --suffix-spec-offset F Additive offset for the draft cap. Default: 0\n"
+        "  --suffix-min-prob F    Stop drafting when prob drops below F. Default: 0\n"
         "  --power N              Target GPU duty cycle percentage, 1..100. Default: 100\n"
         "\n"
         "Sweep:\n"
@@ -213,6 +219,9 @@ static bench_config parse_options(int argc, char **argv) {
         .step_mul = 1.0,
         .suffix_max_depth = 32,
         .suffix_memory_budget = 64ULL * 1024ULL * 1024ULL,
+        .suffix_spec_factor = 1.0f,
+        .suffix_spec_offset = 0.0f,
+        .suffix_min_prob = 0.0f,
     };
 
     for (int i = 1; i < argc; i++) {
@@ -239,6 +248,27 @@ static bench_config parse_options(int argc, char **argv) {
             c.suffix_max_depth = (uint32_t)parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--suffix-memory-budget")) {
             c.suffix_memory_budget = (uint64_t)parse_int(need_arg(&i, argc, argv, arg), arg) * 1024ULL * 1024ULL;
+        } else if (!strcmp(arg, "--suffix-spec-factor")) {
+            const double v = parse_double_arg(need_arg(&i, argc, argv, arg), arg);
+            if (v <= 0.0 || v > 100.0) {
+                fprintf(stderr, "ds4-bench: --suffix-spec-factor must be greater than 0 and at most 100\n");
+                exit(2);
+            }
+            c.suffix_spec_factor = (float)v;
+        } else if (!strcmp(arg, "--suffix-spec-offset")) {
+            const double v = parse_double_arg(need_arg(&i, argc, argv, arg), arg);
+            if (v < 0.0 || v > 100.0) {
+                fprintf(stderr, "ds4-bench: --suffix-spec-offset must be between 0 and 100\n");
+                exit(2);
+            }
+            c.suffix_spec_offset = (float)v;
+        } else if (!strcmp(arg, "--suffix-min-prob")) {
+            const double v = parse_double_arg(need_arg(&i, argc, argv, arg), arg);
+            if (v < 0.0 || v > 1.0) {
+                fprintf(stderr, "ds4-bench: --suffix-min-prob must be between 0 and 1\n");
+                exit(2);
+            }
+            c.suffix_min_prob = (float)v;
         } else if (!strcmp(arg, "--prompt-file")) {
             c.prompt_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--chat-prompt-file")) {
@@ -459,6 +489,9 @@ int main(int argc, char **argv) {
         .suffix_decoding = cfg.suffix_decoding,
         .suffix_max_depth = cfg.suffix_max_depth,
         .suffix_memory_budget = cfg.suffix_memory_budget,
+        .suffix_spec_factor = cfg.suffix_spec_factor,
+        .suffix_spec_offset = cfg.suffix_spec_offset,
+        .suffix_min_prob = cfg.suffix_min_prob,
     };
     ds4_engine *engine = NULL;
     if (ds4_engine_open(&engine, &opt) != 0) return 1;
@@ -472,9 +505,13 @@ int main(int argc, char **argv) {
     }
     if (cfg.suffix_decoding) {
         fprintf(stderr,
-                "ds4-bench: suffix decoding enabled (max_depth=%u, memory_budget=%llu bytes)\n",
+                "ds4-bench: suffix decoding enabled (max_depth=%u, memory_budget=%llu bytes, "
+                "spec_factor=%.2f, spec_offset=%.2f, min_prob=%.4f)\n",
                 cfg.suffix_max_depth,
-                (unsigned long long)cfg.suffix_memory_budget);
+                (unsigned long long)cfg.suffix_memory_budget,
+                cfg.suffix_spec_factor,
+                cfg.suffix_spec_offset,
+                cfg.suffix_min_prob);
     }
 
     char *text = read_file(cfg.prompt_path ? cfg.prompt_path : cfg.chat_prompt_path);

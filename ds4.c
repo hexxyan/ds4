@@ -15080,6 +15080,9 @@ struct ds4_engine {
     bool suffix_decoding;
     uint32_t suffix_max_depth;
     uint64_t suffix_memory_budget;
+    float suffix_spec_factor;
+    float suffix_spec_offset;
+    float suffix_min_prob;
 };
 
 static bool cpu_directional_steering_enabled(
@@ -18038,6 +18041,9 @@ int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
     e->suffix_decoding = opt->suffix_decoding;
     e->suffix_max_depth = opt->suffix_max_depth > 0 ? opt->suffix_max_depth : 32;
     e->suffix_memory_budget = opt->suffix_memory_budget > 0 ? opt->suffix_memory_budget : 64 * 1024 * 1024;
+    e->suffix_spec_factor = opt->suffix_spec_factor > 0.0f ? opt->suffix_spec_factor : 1.0f;
+    e->suffix_spec_offset = opt->suffix_spec_offset > 0.0f ? opt->suffix_spec_offset : 0.0f;
+    e->suffix_min_prob = opt->suffix_min_prob >= 0.0f ? opt->suffix_min_prob : 0.0f;
     if ((opt->directional_steering_attn != 0.0f || opt->directional_steering_ffn != 0.0f) &&
         (!opt->directional_steering_file || !opt->directional_steering_file[0]))
     {
@@ -18763,18 +18769,20 @@ int ds4_session_eval(ds4_session *s, int token, char *err, size_t errlen) {
  * Returns the match length p (0 if no match).  Fills drafts_out[0..*out_n-1]
  * with proposed continuation tokens.  *out_n is set to the number of drafts
  * produced (may be 0 even on a hit, if the continuation path is empty).
+ * *out_score receives the accumulated probability score.
  *
- * draft_cap limits how many draft tokens we request; the adaptive cap is
- * min(alpha * p, draft_cap) where alpha=1 initially.
+ * The adaptive cap is: min(match_len * spec_factor + spec_offset, draft_cap).
  */
 static uint32_t draft_from_suffix_tree(ds4_session *s,
                                         int *drafts_out,
                                         uint32_t draft_cap,
-                                        uint32_t *out_n)
+                                        uint32_t *out_n,
+                                        float *out_score)
 {
     ds4_suffix_tree *tree = s->suffix_tree;
     if (!tree || s->checkpoint.len < 2) {
         *out_n = 0;
+        if (out_score) *out_score = 0.0f;
         return 0;
     }
 
@@ -18783,20 +18791,31 @@ static uint32_t draft_from_suffix_tree(ds4_session *s,
     if (prefix_len > e->suffix_max_depth) prefix_len = e->suffix_max_depth;
     const int *prefix = s->checkpoint.v + (s->checkpoint.len - (int)prefix_len);
 
-    uint32_t suffix_draft_n = 0;
-    uint32_t p = ds4_suffix_tree_query(tree, prefix, prefix_len,
-                                        drafts_out, draft_cap,
-                                        &suffix_draft_n);
-    if (p < 2 || suffix_draft_n == 0) {
+    uint32_t p = ds4_suffix_tree_match_depth(tree, prefix, prefix_len);
+    if (p < 2) {
         *out_n = 0;
-        return p;   /* may be >0 but too short to use */
+        if (out_score) *out_score = 0.0f;
+        return p;
     }
 
-    /* Adaptive cap: with alpha=1, SuffixDecoding drafts at most p tokens for
-     * a p-token suffix match, then the caller's room/slot cap trims further. */
-    if (suffix_draft_n > p) suffix_draft_n = p;
-    if (suffix_draft_n > draft_cap) suffix_draft_n = draft_cap;
+    int adaptive_cap = (int)((float)p * e->suffix_spec_factor + e->suffix_spec_offset);
+    if (adaptive_cap < 1) adaptive_cap = 1;
+    if ((uint32_t)adaptive_cap > draft_cap) adaptive_cap = (int)draft_cap;
+
+    float score = 0.0f;
+    uint32_t suffix_draft_n = 0;
+    uint32_t query_p = ds4_suffix_tree_query(tree, prefix, prefix_len,
+                                             drafts_out, (uint32_t)adaptive_cap,
+                                             &suffix_draft_n,
+                                             e->suffix_min_prob, &score);
+    if (query_p != p || suffix_draft_n == 0 || score <= 0.0f) {
+        *out_n = 0;
+        if (out_score) *out_score = 0.0f;
+        return p;   /* may be >0 but too short or too low confidence */
+    }
+
     *out_n = suffix_draft_n;
+    if (out_score) *out_score = score;
     return p;
 }
 #endif
@@ -18872,8 +18891,9 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
     const bool suffix_spec_log = getenv("DS4_SUFFIX_SPEC_LOG") != NULL;
     if (suffix_available) {
         uint32_t suffix_n = 0;
-        uint32_t p = draft_from_suffix_tree(s, drafts, (uint32_t)draft_cap, &suffix_n);
-        if (p >= 2 && suffix_n > 0) {
+        float suffix_score = 0.0f;
+        uint32_t p = draft_from_suffix_tree(s, drafts, (uint32_t)draft_cap, &suffix_n, &suffix_score);
+        if (p >= 2 && suffix_n > 0 && suffix_score > 0.0f) {
             draft_n = (int)suffix_n;
             for (int i = 0; i < draft_n; i++) {
                 if (drafts[i] == eos_token) {
@@ -18884,14 +18904,14 @@ int ds4_session_eval_speculative_argmax(ds4_session *s, int first_token,
             used_suffix_tree = true;
             if (suffix_spec_log) {
                 fprintf(stderr,
-                        "ds4: suffix spec hit p=%u drafts=%d%s\n",
-                        p,
-                        draft_n,
+                        "ds4: suffix spec hit p=%u drafts=%d score=%.4f%s\n",
+                        p, draft_n, suffix_score,
                         mtp_available ? " (skipped MTP)" : "");
             }
         } else if (suffix_spec_log && p > 0) {
             fprintf(stderr,
-                    "ds4: suffix spec too short p=%u (need >= 2)\n", p);
+                    "ds4: suffix spec miss p=%u n=%u score=%.4f\n",
+                    p, suffix_n, suffix_score);
         }
     }
     if (!used_suffix_tree) {

@@ -21,6 +21,7 @@ typedef struct ds4_suffix_node {
     uint32_t freq;             /* how many times this continuation appeared */
     uint32_t n_children;
     uint32_t cap_children;
+    uint32_t best_child_idx;   /* cached index of highest-freq child (UINT32_MAX = invalid) */
     struct ds4_suffix_node *children;  /* sorted array by token_id */
 } ds4_suffix_node;
 
@@ -34,6 +35,7 @@ typedef struct ds4_suffix_stats {
     uint64_t query_hits;
     uint64_t draft_tokens_produced;
     uint64_t draft_tokens_accepted;
+    double   draft_score_total;
 } ds4_suffix_stats;
 #endif
 
@@ -49,6 +51,7 @@ typedef struct ds4_suffix_tree {
     uint64_t query_hits;
     uint64_t draft_tokens_produced;
     uint64_t draft_tokens_accepted;
+    double   draft_score_total;
 } ds4_suffix_tree;
 
 /* Create a suffix tree with the given byte memory budget and max depth.
@@ -73,16 +76,27 @@ uint32_t ds4_suffix_tree_insert(ds4_suffix_tree *tree,
 uint32_t ds4_suffix_tree_append(ds4_suffix_tree *tree,
                                  const int *tokens, uint32_t len);
 
+/* Return the longest suffix of prefix[0..prefix_len-1] that exists in the
+ * tree and has at least one continuation.  Returns 0 if no draftable match
+ * exists. */
+uint32_t ds4_suffix_tree_match_depth(ds4_suffix_tree *tree,
+                                      const int *prefix, uint32_t prefix_len);
+
 /* Query the tree for draft candidates given a prefix.
  * Traverses the tree from the root using the last `prefix_len` tokens.
  * Returns the match length `p` and fills `drafts[0..*draft_n-1]` with the
  * most frequent continuation path.
  * Sets *draft_n to the number of draft tokens proposed (may be 0).
- * Returns the match length p (0 if no match). */
+ * Returns the match length p (0 if no match).
+ *
+ * Probability estimation: at each continuation step, prob *= child_freq / parent_freq.
+ * Stops early if prob drops below min_prob (0.0 = disabled).
+ * Accumulated score (sum of per-token probs) is written to *out_score. */
 uint32_t ds4_suffix_tree_query(ds4_suffix_tree *tree,
                                 const int *prefix, uint32_t prefix_len,
                                 int *drafts, uint32_t max_drafts,
-                                uint32_t *draft_n);
+                                uint32_t *draft_n,
+                                float min_prob, float *out_score);
 
 /* Prune low-frequency nodes when the tree exceeds its budget.
  * Decrement all frequencies by 1, then remove leaf nodes with freq == 0.
